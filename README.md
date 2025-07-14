@@ -57,6 +57,12 @@ SSIM Score: 0.9886590838432312
 PSNR Score: 31.11587142944336
 ```
 
+## Notes
+
+- The SSIM calculation uses sample covariance (and sample variance) for its statistics. This aligns with the default behavior of `scikit-image`'s `structural_similarity` function, where `use_sample_covariance` is True by default.
+
+- This implementation does not offer an option for applying a Gaussian filter to the images or local windows prior to the SSIM/PSNR calculation.
+
 ## Original author
 
 Chen Yu / [@Chen Yu](https://github.com/chinue)
