@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python/
+env/
+venv/
+.env
+
+# Distribution / build
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Ruff cache
+.ruff_cache/

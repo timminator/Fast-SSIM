@@ -35,3 +35,12 @@ fast_ssim = ["resources/*ssim.*"]
 
 [tool.setuptools.dynamic]
 version = {attr = "fast_ssim._core.__version__"}
+
+[tool.ruff]
+exclude = ["build", "venv", ".venv", "__pycache__"]
+preview = true
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "W"]
+ignore = ["E501", "SIM108", "SIM102", "SIM114"]
