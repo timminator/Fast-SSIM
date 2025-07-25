@@ -16,3 +16,6 @@ build/
 
 # Ruff cache
 .ruff_cache/
+
+# Visual Studio
+*.vcxproj.user

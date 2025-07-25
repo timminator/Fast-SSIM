@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 
-__version__ = '1.0.1'
+__version__ = '1.0.2'
 
 ssim_dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 ssim_dll_name = 'ssim.dll' if (os.name == 'nt') else 'libssim.so'
