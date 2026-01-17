@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "Fast-SSIM"
-description = "Fast SSIM and PSNR algorithms for Python. Up to 30x speedup for SSIM and up to 10x for PSNR."
+description = "Fast SSIM and PSNR algorithms for Python."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

@@ -1,3 +1,3 @@
-g++ -fPIC ssim.cpp -O3 -lm -DNDEBUG -msse4  -shared -o libfilter.so
+g++ -shared -fPIC -O3 -mavx2 -mfma -fopenmp -DNDEBUG ssim.cpp -o libssim.so
 
-g++ ssim.cpp main.cpp -O3 -lm -DNDEBUG -msse4  -o test
+g++ -O3 -mavx2 -mfma -fopenmp -DNDEBUG ssim.cpp main.cpp -o test

@@ -1,8 +1,9 @@
-import fast_ssim
 from skimage.io import imread
 
-img1_path = r"test_images\0.jpg"
-img2_path = r"test_images\1.jpg"
+import fast_ssim
+
+img1_path = r"test_images/0.jpg"
+img2_path = r"test_images/1.jpg"
 
 # Load the images into NumPy arrays
 img1 = imread(img1_path)

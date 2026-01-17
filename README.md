@@ -11,11 +11,12 @@
 ## ℹ About
 
 This fork wraps the Fast-SSIM project in an easy to use package that can be readily installed via PyPI.
-The Fast-SSIM package can accelerate your SSIM and PSNR calculations by up to 30x and 10x respectively.
+To further accelerate processing, this version enables OpenMP multithreading and leverages AVX2/FMA hardware instructions.
 
 ## Requirements
 
 - Python 3.9 or higher
+- An AVX2/FMA capable CPU (for older CPUs Fast-SSIM v1.0.2 can be used)
 
 ## How to Install
 
@@ -28,11 +29,12 @@ pip install Fast-SSIM
 The functionalities are explained in the following code snippet that is also provided in this repo:
 
 ```python
-import fast_ssim
 from skimage.io import imread
 
-img1_path = r"test_images\0.jpg"
-img2_path = r"test_images\1.jpg"
+import fast_ssim
+
+img1_path = r"test_images/0.jpg"
+img2_path = r"test_images/1.jpg"
 
 # Load the images into NumPy arrays
 img1 = imread(img1_path)

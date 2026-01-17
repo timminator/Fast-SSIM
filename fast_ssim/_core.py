@@ -3,7 +3,9 @@ import os
 
 import numpy as np
 
-__version__ = '1.0.2'
+os.environ['OMP_WAIT_POLICY'] = 'PASSIVE'
+
+__version__ = '1.1.0'
 
 ssim_dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 ssim_dll_name = 'ssim.dll' if (os.name == 'nt') else 'libssim.so'
@@ -16,16 +18,6 @@ class SharedLibraryLoadError(ImportError):
 
 class Loader:
     dll = None
-
-    try:
-        dll_path = os.path.join(ssim_dll_path, ssim_dll_name)
-        if os.path.exists(dll_path):
-            dll = np.ctypeslib.load_library(ssim_dll_name, ssim_dll_path)
-        else:
-            raise SharedLibraryLoadError(f"Shared library not found at: {dll_path}")
-    except Exception as e:
-        raise SharedLibraryLoadError(f"Failed to load shared library '{ssim_dll_name}': {e}") from e
-
     type_dict = {'int': ctypes.c_int, 'float': ctypes.c_float, 'double': ctypes.c_double, 'void': None,
                  'int32': ctypes.c_int32, 'uint32': ctypes.c_uint32, 'int16': ctypes.c_int16, 'uint16': ctypes.c_uint16,
                  'int8': ctypes.c_int8, 'uint8': ctypes.c_uint8, 'byte': ctypes.c_uint8,
@@ -33,6 +25,35 @@ class Loader:
                  'float*': np.ctypeslib.ndpointer(dtype='float32', ndim=1, flags='CONTIGUOUS'),
                  'int*': np.ctypeslib.ndpointer(dtype='int32', ndim=1, flags='CONTIGUOUS'),
                  'byte*': np.ctypeslib.ndpointer(dtype='uint8', ndim=1, flags='CONTIGUOUS')}
+
+    try:
+        dll_path = os.path.join(ssim_dll_path, ssim_dll_name)
+        if os.path.exists(dll_path):
+            dll = np.ctypeslib.load_library(ssim_dll_name, ssim_dll_path)
+
+            check_func = dll.CheckCpuSupport
+            check_func.restype = ctypes.c_int
+            check_func.argtypes = []
+
+            status = check_func()
+
+            if status != 0:
+                error_map = {
+                    1: "CPU does not support AVX instructions or OS does not support AVX context switching.",
+                    2: "CPU does not support AVX2 instructions.",
+                    3: "CPU does not support FMA instructions."
+                }
+                msg = error_map.get(status, f"Unknown compatibility error code: {status}")
+
+                del dll
+                dll = None
+                raise RuntimeError(f"Hardware Not Supported: {msg} This library requires an AVX2/FMA capable CPU.")
+        else:
+            raise SharedLibraryLoadError(f"Shared library not found at: {dll_path}")
+    except RuntimeError as e:
+        raise e
+    except Exception as e:
+        raise SharedLibraryLoadError(f"Failed to load shared library '{ssim_dll_name}': {e}") from e
 
     @staticmethod
     def get_function(res_type='float', func_name='PSNR_Byte', arg_types=None):
@@ -45,7 +66,7 @@ class Loader:
 
     @staticmethod
     def had_member(name='dll'):
-        return name in Loader.__dict__
+        return name in Loader.__dict__ and Loader.dll is not None
 
 
 class DLL:
