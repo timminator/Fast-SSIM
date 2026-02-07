@@ -4,16 +4,104 @@
 #include "emmintrin.h"
 #include "tmmintrin.h"
 #include "string.h"
-
-// OpenMP Support
-#if defined(_OPENMP)
-    #include <omp.h>
-#endif
+#include <vector>
+#include <queue>
+#include <memory>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <future>
+#include <functional>
+#include <stdexcept>
+#include <atomic>
+#include <algorithm>
 
 // AVX2 Support
 #if defined(__AVX2__)
     #include <immintrin.h>
 #endif
+
+static unsigned int GetHardwareThreadCount() {
+    unsigned int threads = std::thread::hardware_concurrency();
+    if (threads == 0) threads = 4;
+    return threads;
+}
+
+// Thread Pool
+class ThreadPool {
+public:
+    ThreadPool(size_t threads) : stop(false) {
+        for(size_t i = 0; i<threads; ++i)
+            workers.emplace_back(
+                [this] {
+                    for(;;) {
+                        std::function<void()> task;
+
+                        {
+                            std::unique_lock<std::mutex> lock(this->queue_mutex);
+                            this->condition.wait(lock,
+                                [this]{ return this->stop || !this->tasks.empty(); });
+                            if(this->stop && this->tasks.empty())
+                                return;
+                            task = std::move(this->tasks.front());
+                            this->tasks.pop();
+                        }
+
+                        task();
+                    }
+                }
+            );
+    }
+
+    template<class F, class... Args>
+    auto enqueue(F&& f, Args&&... args) 
+        -> std::future<std::invoke_result_t<F, Args...>>
+    {
+        using return_type = std::invoke_result_t<F, Args...>;
+
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+        );
+        
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            if(stop)
+                throw std::runtime_error("enqueue on stopped ThreadPool");
+
+            tasks.emplace([task](){ (*task)(); });
+        }
+        condition.notify_one();
+        return res;
+    }
+
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for(std::thread &worker: workers)
+            worker.join();
+    }
+
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    bool stop;
+};
+
+static ThreadPool* global_pool = nullptr;
+static std::once_flag pool_init_flag;
+
+static void ensure_pool_initialized() {
+    std::call_once(pool_init_flag, [](){
+        global_pool = new ThreadPool(GetHardwareThreadCount());
+    });
+}
 
 // CPU Feature Detection
 #ifdef _MSC_VER
@@ -93,113 +181,164 @@ static inline __m256 LoadF32x8(Byte* pData)
 }
 #endif
 
-// --- MSE Implementations ---
+static unsigned int GetTargetThreadCount(int total_rows, int block_size) {
+    unsigned int hw = GetHardwareThreadCount();
 
+    unsigned int useful_threads =
+        (total_rows + block_size - 1) / block_size;
+
+    return std::min(hw, useful_threads);
+}
+
+static int GetAdaptiveBlockSize(int total_rows, int n_threads) {
+    int target_chunks = n_threads * 4;
+    
+    int block_size = total_rows / target_chunks;
+    
+    if (block_size < 8) block_size = 8;      // Don't go below 8 rows (overhead too high)
+    if (block_size > 128) block_size = 128;  // Don't go above 128 (bad balancing)
+    
+    return block_size;
+}
+
+// --- MSE Implementations ---
 template <typename Data, typename T>
 static double MSE_Data_t(Data* pDataX, Data* pDataY, int widthBytes, int width, int height)
 {
-    double sum=0;
-    int cn=widthBytes/width, width3=cn*width, width4=width3/4*4;
+    ensure_pool_initialized();
+    int cn = widthBytes / width, width3 = cn * width, width4 = width3 / 4 * 4;
     
-    #pragma omp parallel for reduction(+:sum)
-    for(int y=0; y<height; y++)
-    {
-        Data *pX=pDataX+y*widthBytes;
-        Data *pY=pDataY+y*widthBytes;
-        T s_local = 0;
-        for(int x=0; x<width4; x+=4)
-        {
-            T diff0=pY[x+0]-pX[x+0];
-            T diff1=pY[x+1]-pX[x+1];
-            T diff2=pY[x+2]-pX[x+2];
-            T diff3=pY[x+3]-pX[x+3];
-            s_local += diff0*diff0 + diff1*diff1 + diff2*diff2 + diff3*diff3;
-        }
-        for(int x=width4; x<width3; x++)
-        {
-            T diff=pY[x]-pX[x];
-            s_local += diff*diff;
-        }
-        sum += s_local;
+    unsigned int hw = GetHardwareThreadCount();
+    const int BLOCK_SIZE = GetAdaptiveBlockSize(height, hw);
+    unsigned int n_threads = GetTargetThreadCount(height, BLOCK_SIZE);
+
+    std::atomic<int> next_row(0);
+
+    std::vector<std::future<double>> results;
+    results.reserve(n_threads);
+
+    for (unsigned int t = 0; t < n_threads; ++t) {
+        results.emplace_back(global_pool->enqueue([=, &next_row]() -> double {
+            double thread_sum = 0;
+            while(true) {
+                int start_y = next_row.fetch_add(BLOCK_SIZE);
+                if (start_y >= height) break;
+                int end_y = MIN(start_y + BLOCK_SIZE, height);
+
+                for (int y = start_y; y < end_y; y++) {
+                    Data* pX = pDataX + y * widthBytes;
+                    Data* pY = pDataY + y * widthBytes;
+                    T s_local = 0;
+                    for (int x = 0; x < width4; x += 4) {
+                        T diff0 = pY[x + 0] - pX[x + 0];
+                        T diff1 = pY[x + 1] - pX[x + 1];
+                        T diff2 = pY[x + 2] - pX[x + 2];
+                        T diff3 = pY[x + 3] - pX[x + 3];
+                        s_local += diff0 * diff0 + diff1 * diff1 + diff2 * diff2 + diff3 * diff3;
+                    }
+                    for (int x = width4; x < width3; x++) {
+                        T diff = pY[x] - pX[x];
+                        s_local += diff * diff;
+                    }
+                    thread_sum += s_local;
+                }
+            }
+            return thread_sum;
+        }));
     }
-    return sum/(height*width3);
+    double total_sum = 0;
+    for (auto& res : results) total_sum += res.get();
+    return total_sum / (height * width3);
 }
 
 static double MSE_Data_Byte(Byte* pDataX, Byte* pDataY, int widthBytes, int width, int height)
 {
-    double sum=0;
-    int width3=widthBytes/width*width;
-    
+    ensure_pool_initialized();
+    int width3 = widthBytes / width * width;
+
+    unsigned int hw = GetHardwareThreadCount();
+    const int BLOCK_SIZE = GetAdaptiveBlockSize(height, hw);
+    unsigned int n_threads = GetTargetThreadCount(height, BLOCK_SIZE);
+
+    std::atomic<int> next_row(0);
+
+    std::vector<std::future<double>> results;
+    results.reserve(n_threads);
+
+    for (unsigned int t = 0; t < n_threads; ++t) {
+        results.emplace_back(global_pool->enqueue([=, &next_row]() -> double {
+            double thread_sum = 0;
+            while(true) {
+                int start_y = next_row.fetch_add(BLOCK_SIZE);
+                if (start_y >= height) break;
+                int end_y = MIN(start_y + BLOCK_SIZE, height);
+                double chunk_acc = 0;
 #if defined(__AVX2__)
-    int width32 = width3 / 32 * 32;
-    #pragma omp parallel for reduction(+:sum)
-    for(int y=0; y<height; y++)
-    {
-        Byte *pX=pDataX+y*widthBytes;
-        Byte *pY=pDataY+y*widthBytes;
-        int x=0;
-        __m256i s_acc = _mm256_setzero_si256(); 
-        
-        for(; x<width32; x+=32)
-        {
-            __m256i x_vec = _mm256_loadu_si256((__m256i*)(pX+x));
-            __m256i y_vec = _mm256_loadu_si256((__m256i*)(pY+x));
-            
-            __m256i x_lo = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(x_vec, 0));
-            __m256i x_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(x_vec, 1));
-            __m256i y_lo = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(y_vec, 0));
-            __m256i y_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(y_vec, 1));
+                int width32 = width3 / 32 * 32;
+                for(int y=start_y; y<end_y; y++) {
+                    Byte *pX=pDataX+y*widthBytes;
+                    Byte *pY=pDataY+y*widthBytes;
+                    int x=0;
+                    __m256i s_acc = _mm256_setzero_si256(); 
+                    for(; x<width32; x+=32) {
+                        __m256i x_vec = _mm256_loadu_si256((__m256i*)(pX+x));
+                        __m256i y_vec = _mm256_loadu_si256((__m256i*)(pY+x));
+                        
+                        __m256i x_lo = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(x_vec, 0));
+                        __m256i x_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(x_vec, 1));
+                        __m256i y_lo = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(y_vec, 0));
+                        __m256i y_hi = _mm256_cvtepu8_epi16(_mm256_extracti128_si256(y_vec, 1));
 
-            __m256i diff_lo = _mm256_sub_epi16(x_lo, y_lo);
-            __m256i diff_hi = _mm256_sub_epi16(x_hi, y_hi);
+                        __m256i diff_lo = _mm256_sub_epi16(x_lo, y_lo);
+                        __m256i diff_hi = _mm256_sub_epi16(x_hi, y_hi);
 
-            s_acc = _mm256_add_epi32(s_acc, _mm256_madd_epi16(diff_lo, diff_lo));
-            s_acc = _mm256_add_epi32(s_acc, _mm256_madd_epi16(diff_hi, diff_hi));
-        }
-
-        int s0 = 0;
-        int* temp = (int*)&s_acc;
-        for(int k=0; k<8; k++) s0 += temp[k];
-
-        for(; x<width3; x++)
-        {
-            int d=pY[x]-pX[x];
-            s0 += d*d;
-        }
-        sum += s0;
-    }
+                        s_acc = _mm256_add_epi32(s_acc, _mm256_madd_epi16(diff_lo, diff_lo));
+                        s_acc = _mm256_add_epi32(s_acc, _mm256_madd_epi16(diff_hi, diff_hi));
+                    }
+                    int64_t s0 = 0;
+                    int* temp = (int*)&s_acc;
+                    for(int k=0; k<8; k++) s0 += (int64_t)temp[k];
+                    for(; x<width3; x++) {
+                        int d=pY[x]-pX[x];
+                        s0 += d*d;
+                    }
+                    chunk_acc += s0;
+                }
 #else
-    int width8=width3/8*8;
-    #pragma omp parallel for reduction(+:sum)
-    for(int y=0; y<height; y++)
-    {
-        Byte *pX=pDataX+y*widthBytes;
-        Byte *pY=pDataY+y*widthBytes;
-        int x=0;
-        __m128i zero=_mm_setzero_si128();
-        __m128i s4 = _mm_setzero_si128();
-        int s0=0;
-        for(x=0; x<width8; x+=8)
-        {
-            __m128i x8 = _mm_unpacklo_epi8(_mm_loadl_epi64((__m128i*)(pX+x)), zero);
-            __m128i y8 = _mm_unpacklo_epi8(_mm_loadl_epi64((__m128i*)(pY+x)), zero);
-            __m128i d8 = _mm_sub_epi16(x8, y8);
-            __m128i z8 = _mm_mullo_epi16(d8, d8);
-            __m128i z8_0 = _mm_unpacklo_epi16(z8, zero);
-            __m128i z8_1 = _mm_unpackhi_epi16(z8, zero);
-            s4 = _mm_add_epi32(s4, _mm_add_epi32(z8_0, z8_1));
-        }
-        int* pS=(int*)&s4;
-        s0=pS[0]+pS[1]+pS[2]+pS[3];
-        for(; x<width3; x++)
-        {
-            int d=pY[x]-pX[x];
-            s0 += d*d;
-        }
-        sum += s0;
-    }
+                int width8 = width3 / 8 * 8;
+                for(int y=start_y; y<end_y; y++) {
+                    Byte *pX=pDataX+y*widthBytes;
+                    Byte *pY=pDataY+y*widthBytes;
+                    int x=0;
+                    __m128i zero=_mm_setzero_si128();
+                    __m128i s4 = _mm_setzero_si128();
+                    int64_t s0 = 0;
+                    for(x=0; x<width8; x+=8) {
+                        __m128i x8 = _mm_unpacklo_epi8(_mm_loadl_epi64((__m128i*)(pX+x)), zero);
+                        __m128i y8 = _mm_unpacklo_epi8(_mm_loadl_epi64((__m128i*)(pY+x)), zero);
+                        __m128i d8 = _mm_sub_epi16(x8, y8);
+                        __m128i z8 = _mm_mullo_epi16(d8, d8);
+                        __m128i z8_0 = _mm_unpacklo_epi16(z8, zero);
+                        __m128i z8_1 = _mm_unpackhi_epi16(z8, zero);
+                        s4 = _mm_add_epi32(s4, _mm_add_epi32(z8_0, z8_1));
+                    }
+                    int* pS=(int*)&s4;
+                    s0 = (int64_t)pS[0] + pS[1] + pS[2] + pS[3];
+                    for(; x<width3; x++) {
+                        int d=pY[x]-pX[x];
+                        s0 += d*d;
+                    }
+                    chunk_acc += s0;
+                }
 #endif
-    return sum/(height*width3);
+                thread_sum += chunk_acc;
+            }
+            return thread_sum;
+        }));
+    }
+    double total_sum = 0;
+    for (auto& res : results) total_sum += res.get();
+    return total_sum / (height * width3);
 }
 
 double MSE_Byte(Byte* pDataX, Byte* pDataY, int step, int width, int height)
@@ -643,37 +782,52 @@ private:
 template<typename Data>
 float SSIM_Generic(Data* pDataX, Data* pDataY, int widthBytes, int width, int height, int win_size, double maxVal)
 {
+    ensure_pool_initialized();
+    int half_size = win_size / 2;
+    int loop_start = half_size;
+    int loop_end = height - half_size;
+    int total_rows = loop_end - loop_start;
+
+    if (total_rows <= 0) return 0.0f;
+    
+    unsigned int hw = GetHardwareThreadCount();
+    const int BLOCK_SIZE = GetAdaptiveBlockSize(height, hw);
+    unsigned int n_threads = GetTargetThreadCount(height, BLOCK_SIZE);
+
+    std::atomic<int> next_row(loop_start);
+    
+    std::vector<std::future<std::pair<double, int>>> results;
+    results.reserve(n_threads);
+
+    for (unsigned int t = 0; t < n_threads; ++t) {
+        results.emplace_back(global_pool->enqueue([=, &next_row]() -> std::pair<double, int> {
+            double localTotalSum = 0;
+            int localTotalCount = 0;
+
+            WinSum3F<Data> worker(pDataX, pDataY, widthBytes, width, height, win_size, maxVal);
+
+            while(true) {
+                int start = next_row.fetch_add(BLOCK_SIZE);
+                if (start >= loop_end) break;
+                int end = MIN(start + BLOCK_SIZE, loop_end);
+                
+                double blockSum = 0;
+                int blockCount = 0;
+                worker.ProcessStrip(start, end, blockSum, blockCount);
+
+                localTotalSum += blockSum;
+                localTotalCount += blockCount;
+            }
+            return std::make_pair(localTotalSum, localTotalCount);
+        }));
+    }
+
     double totalSum = 0;
     int totalCount = 0;
-    int half_size = win_size/2;
-
-    #pragma omp parallel reduction(+:totalSum, totalCount)
-    {
-        WinSum3F<Data> worker(pDataX, pDataY, widthBytes, width, height, win_size, maxVal);
-        
-        int loop_start = half_size;
-        int loop_end = height - half_size;
-        int total_rows = loop_end - loop_start;
-        
-        #if defined(_OPENMP)
-            int n_threads = omp_get_num_threads();
-            int tid = omp_get_thread_num();
-        #else
-            int n_threads = 1;
-            int tid = 0;
-        #endif
-        
-        int rows_per_thread = total_rows / n_threads;
-        int my_start = loop_start + tid * rows_per_thread;
-        int my_end = (tid == n_threads - 1) ? loop_end : my_start + rows_per_thread;
-
-        if (my_start < my_end) {
-            double localSum = 0;
-            int localCount = 0;
-            worker.ProcessStrip(my_start, my_end, localSum, localCount);
-            totalSum += localSum;
-            totalCount += localCount;
-        }
+    for (auto && result : results) {
+        std::pair<double, int> res = result.get();
+        totalSum += res.first;
+        totalCount += res.second;
     }
 
     if (totalCount == 0) return 0.0f;

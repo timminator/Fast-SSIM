@@ -3,9 +3,7 @@ import os
 
 import numpy as np
 
-os.environ['OMP_WAIT_POLICY'] = 'PASSIVE'
-
-__version__ = '1.1.0'
+__version__ = '1.2.0'
 
 ssim_dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 ssim_dll_name = 'ssim.dll' if (os.name == 'nt') else 'libssim.so'

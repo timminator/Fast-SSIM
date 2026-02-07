@@ -11,7 +11,7 @@
 ## ℹ About
 
 This fork wraps the Fast-SSIM project in an easy to use package that can be readily installed via PyPI.
-To further accelerate processing, this version enables OpenMP multithreading and leverages AVX2/FMA hardware instructions.
+To further accelerate processing, this version enables multithreading and leverages AVX2/FMA hardware instructions.
 
 ## Requirements
 

@@ -19,3 +19,5 @@ build/
 
 # Visual Studio
 *.vcxproj.user
+.vs/
+src/x64/
