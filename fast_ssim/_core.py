@@ -3,7 +3,7 @@ import os
 
 import numpy as np
 
-__version__ = '1.2.0'
+__version__ = '1.3.0'
 
 ssim_dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 ssim_dll_name = 'ssim.dll' if (os.name == 'nt') else 'libssim.so'
@@ -16,6 +16,8 @@ class SharedLibraryLoadError(ImportError):
 
 class Loader:
     dll = None
+    cpu_status = -1
+
     type_dict = {'int': ctypes.c_int, 'float': ctypes.c_float, 'double': ctypes.c_double, 'void': None,
                  'int32': ctypes.c_int32, 'uint32': ctypes.c_uint32, 'int16': ctypes.c_int16, 'uint16': ctypes.c_uint16,
                  'int8': ctypes.c_int8, 'uint8': ctypes.c_uint8, 'byte': ctypes.c_uint8,
@@ -33,23 +35,9 @@ class Loader:
             check_func.restype = ctypes.c_int
             check_func.argtypes = []
 
-            status = check_func()
-
-            if status != 0:
-                error_map = {
-                    1: "CPU does not support AVX instructions or OS does not support AVX context switching.",
-                    2: "CPU does not support AVX2 instructions.",
-                    3: "CPU does not support FMA instructions."
-                }
-                msg = error_map.get(status, f"Unknown compatibility error code: {status}")
-
-                del dll
-                dll = None
-                raise RuntimeError(f"Hardware Not Supported: {msg} This library requires an AVX2/FMA capable CPU.")
+            cpu_status = check_func()
         else:
             raise SharedLibraryLoadError(f"Shared library not found at: {dll_path}")
-    except RuntimeError as e:
-        raise e
     except Exception as e:
         raise SharedLibraryLoadError(f"Failed to load shared library '{ssim_dll_name}': {e}") from e
 
@@ -84,6 +72,24 @@ class DLL:
 
         # float SSIM_Float(float* pDataX, float* pDataY, int step, int width, int height, int win_size, double maxVal);
         SSIM_Float = Loader.get_function('float', 'SSIM_Float', ['float*', 'float*', 'int', 'int', 'int', 'int', 'double'])
+
+        # float SSIM_Byte_Slow(Byte* pDataX, Byte* pDataY, int widthBytes, int width, int height, int win_size);
+        SSIM_Byte_Slow = Loader.get_function('float', 'SSIM_Byte_Slow', ['Byte*', 'Byte*', 'int', 'int', 'int', 'int'])
+
+
+def get_cpu_status() -> int:
+    """
+    Retrieves the hardware acceleration status detected by the C++ backend.
+
+    Returns:
+        int: A status code representing the CPU support level:
+            * 0: AVX2 + FMA fully supported and active.
+            * 1: Missing OS XSAVE or AVX (Falling back to SSE).
+            * 2: Missing AVX2 (Falling back to SSE).
+            * 3: Missing FMA (Falling back to SSE).
+            * -1: DLL failed to load or status was not checked.
+    """
+    return Loader.cpu_status
 
 
 def psnr(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None) -> float:
@@ -155,3 +161,36 @@ def ssim(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None, wi
         return DLL.SSIM_Byte(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size, 255 if (data_range is None) else int(data_range))
     if (DLL.had_function('SSIM_Float') and x.dtype == 'float32' and y.dtype == 'float32'):
         return DLL.SSIM_Float(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size, 255.0 if (data_range is None) else float(data_range))
+
+
+def ssim_slow(x: np.ndarray, y: np.ndarray, win_size: int = 7) -> float:
+    """
+    Calculates the Structural Similarity Index (SSIM) using the unoptimized, scalar C++ fallback.
+
+    Args:
+        x (np.ndarray): The first image (e.g., original image). Can be 2D (grayscale) or 3D (color).
+                        Supported dtype is 'uint8' only.
+        y (np.ndarray): The second image (e.g., reconstructed or noisy image). Must have the same
+                        dimensions and dtype as `x`.
+        win_size (int, optional): The size of the sliding window for SSIM calculation. Defaults to 7.
+
+    Returns:
+        float: The SSIM value.
+
+    Raises:
+        ValueError: If the input images have unsupported dimensions.
+        NotImplementedError: If the input images are not of type 'uint8'.
+    """
+    if x.ndim == 2:
+        h, w = x.shape
+        c = 1
+    elif x.ndim == 3:
+        h, w, c = x.shape
+    else:
+        raise ValueError(f"Unsupported image dimensions: {x.shape}")
+
+    if x.dtype != 'uint8' or y.dtype != 'uint8':
+        raise NotImplementedError("ssim_slow is only implemented for uint8 data types.")
+
+    if DLL.had_function('SSIM_Byte_Slow'):
+        return DLL.SSIM_Byte_Slow(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size)

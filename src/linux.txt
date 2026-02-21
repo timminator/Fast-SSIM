@@ -1,3 +1,6 @@
-g++ -shared -fPIC -O3 -flto -mavx2 -mfma -std=c++20 -pthread -DNDEBUG ssim.cpp -o libssim.so
+g++ -c -fPIC -O3 -std=c++20 -pthread -DNDEBUG ssim_dispatch.cpp -o ssim_dispatch.o
+g++ -c -fPIC -O3 -std=c++20 -pthread -DNDEBUG ssim_sse.cpp -o ssim_sse.o
+g++ -c -fPIC -O3 -mavx2 -mfma -std=c++20 -pthread -DNDEBUG ssim_avx2.cpp -o ssim_avx2.o
+g++ -shared -flto -pthread ssim_dispatch.o ssim_sse.o ssim_avx2.o -o libssim.so
 
-g++ -O3 -mavx2 -mfma -fopenmp -DNDEBUG ssim.cpp main.cpp -o test
+g++ -O3 -std=c++20 -pthread -DNDEBUG main.cpp -L. -lssim -o test

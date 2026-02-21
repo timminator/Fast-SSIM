@@ -36,8 +36,8 @@ int main()
     double psnr=0, ssim=0;
     int width=1920, height=1080, step=width*3, n=10;
     Byte *pDataX=new Byte[step*height], *pDataY=new Byte[step*height];
-    load_data("../x_1920x1080.RGB", pDataX);
-    load_data("../y_1920x1080.RGB", pDataY);
+    load_data("../test_images/x_1920x1080.RGB", pDataX);
+    load_data("../test_images/y_1920x1080.RGB", pDataY);
     TIME_DECLARE();
     TIME_BEGIN();
     for(int i=0; i<n; i++)

@@ -21,3 +21,4 @@ build/
 *.vcxproj.user
 .vs/
 src/x64/
+src/Testbed/
