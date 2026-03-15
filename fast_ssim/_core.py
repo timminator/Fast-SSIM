@@ -1,12 +1,20 @@
+from __future__ import annotations
+
 import ctypes
 import os
 
 import numpy as np
 
-__version__ = '1.3.0'
+__version__ = '1.3.1'
 
 ssim_dll_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'resources')
 ssim_dll_name = 'ssim.dll' if (os.name == 'nt') else 'libssim.so'
+
+Float1D = np.ctypeslib.ndpointer(dtype=np.float32, ndim=1, flags='C_CONTIGUOUS')
+Uint81D = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags='C_CONTIGUOUS')
+c_int = ctypes.c_int
+c_float = ctypes.c_float
+c_double = ctypes.c_double
 
 
 class SharedLibraryLoadError(ImportError):
@@ -18,63 +26,74 @@ class Loader:
     dll = None
     cpu_status = -1
 
-    type_dict = {'int': ctypes.c_int, 'float': ctypes.c_float, 'double': ctypes.c_double, 'void': None,
-                 'int32': ctypes.c_int32, 'uint32': ctypes.c_uint32, 'int16': ctypes.c_int16, 'uint16': ctypes.c_uint16,
-                 'int8': ctypes.c_int8, 'uint8': ctypes.c_uint8, 'byte': ctypes.c_uint8,
-                 'char*': ctypes.c_char_p,
-                 'float*': np.ctypeslib.ndpointer(dtype='float32', ndim=1, flags='CONTIGUOUS'),
-                 'int*': np.ctypeslib.ndpointer(dtype='int32', ndim=1, flags='CONTIGUOUS'),
-                 'byte*': np.ctypeslib.ndpointer(dtype='uint8', ndim=1, flags='CONTIGUOUS')}
+    @classmethod
+    def load(cls):
+        if cls.dll is not None:
+            return
 
-    try:
         dll_path = os.path.join(ssim_dll_path, ssim_dll_name)
-        if os.path.exists(dll_path):
-            dll = np.ctypeslib.load_library(ssim_dll_name, ssim_dll_path)
+        if not os.path.exists(dll_path):
+            raise SharedLibraryLoadError(f"Shared library not found at: {dll_path}")
 
-            check_func = dll.CheckCpuSupport
-            check_func.restype = ctypes.c_int
+        try:
+            cls.dll = np.ctypeslib.load_library(ssim_dll_name, ssim_dll_path)
+
+            check_func = cls.dll.CheckCpuSupport
+            check_func.restype = c_int
             check_func.argtypes = []
 
-            cpu_status = check_func()
-        else:
-            raise SharedLibraryLoadError(f"Shared library not found at: {dll_path}")
-    except Exception as e:
-        raise SharedLibraryLoadError(f"Failed to load shared library '{ssim_dll_name}': {e}") from e
+            cls.cpu_status = check_func()
+        except Exception as e:
+            raise SharedLibraryLoadError(f"Failed to load shared library '{ssim_dll_name}': {e}") from e
 
-    @staticmethod
-    def get_function(res_type='float', func_name='PSNR_Byte', arg_types=None):
-        if arg_types is None:
-            arg_types = ['Byte*', 'int', 'int', 'int', 'Byte*']
-        func = Loader.dll.__getattr__(func_name)
-        func.restype = Loader.type_dict[res_type]
-        func.argtypes = [Loader.type_dict[str.lower(x).replace(' ', '')] for x in arg_types]
+    @classmethod
+    def bind_func(cls, name, restype, argtypes):
+        if cls.dll is None or not hasattr(cls.dll, name):
+            return None
+        func = getattr(cls.dll, name)
+        func.restype = restype
+        func.argtypes = argtypes
         return func
-
-    @staticmethod
-    def had_member(name='dll'):
-        return name in Loader.__dict__ and Loader.dll is not None
 
 
 class DLL:
-    @staticmethod
-    def had_function(name='PSNR_Byte'):
-        return name in DLL.__dict__
+    _initialized = False
+    PSNR_DISPATCH = {}
+    SSIM_DISPATCH = {}
+    SSIM_SLOW_DISPATCH = {}
 
-    if Loader.had_member('dll'):
+    @classmethod
+    def initialize(cls):
+        if cls._initialized:
+            return
+        Loader.load()
+
         # float PSNR_Byte(Byte* pDataX, Byte* pDataY, int step, int width, int height, int maxVal);
-        PSNR_Byte = Loader.get_function('float', 'PSNR_Byte', ['Byte*', 'Byte*', 'int', 'int', 'int', 'int'])
-
+        psnr_byte = Loader.bind_func('PSNR_Byte', c_float, [Uint81D, Uint81D, c_int, c_int, c_int, c_int])
         # float PSNR_Float(float* pDataX, float* pDataY, int step, int width, int height, double maxVal);
-        PSNR_Float = Loader.get_function('float', 'PSNR_Float', ['float*', 'float*', 'int', 'int', 'int', 'double'])
-
+        psnr_float = Loader.bind_func('PSNR_Float', c_float, [Float1D, Float1D, c_int, c_int, c_int, c_double])
         # float SSIM_Byte(Byte* pDataX, Byte* pDataY, int step, int width, int height, int win_size, int maxVal);
-        SSIM_Byte = Loader.get_function('float', 'SSIM_Byte', ['Byte*', 'Byte*', 'int', 'int', 'int', 'int', 'int'])
-
+        ssim_byte = Loader.bind_func('SSIM_Byte', c_float, [Uint81D, Uint81D, c_int, c_int, c_int, c_int, c_int])
         # float SSIM_Float(float* pDataX, float* pDataY, int step, int width, int height, int win_size, double maxVal);
-        SSIM_Float = Loader.get_function('float', 'SSIM_Float', ['float*', 'float*', 'int', 'int', 'int', 'int', 'double'])
-
+        ssim_float = Loader.bind_func('SSIM_Float', c_float, [Float1D, Float1D, c_int, c_int, c_int, c_int, c_double])
         # float SSIM_Byte_Slow(Byte* pDataX, Byte* pDataY, int widthBytes, int width, int height, int win_size);
-        SSIM_Byte_Slow = Loader.get_function('float', 'SSIM_Byte_Slow', ['Byte*', 'Byte*', 'int', 'int', 'int', 'int'])
+        ssim_byte_slow = Loader.bind_func('SSIM_Byte_Slow', c_float, [Uint81D, Uint81D, c_int, c_int, c_int, c_int])
+
+        cls.PSNR_DISPATCH = {
+            np.uint8: psnr_byte,
+            np.float32: psnr_float
+        }
+
+        cls.SSIM_DISPATCH = {
+            np.uint8: ssim_byte,
+            np.float32: ssim_float
+        }
+
+        cls.SSIM_SLOW_DISPATCH = {
+            np.uint8: ssim_byte_slow
+        }
+
+        cls._initialized = True
 
 
 def get_cpu_status() -> int:
@@ -89,7 +108,33 @@ def get_cpu_status() -> int:
             * 3: Missing FMA (Falling back to SSE).
             * -1: DLL failed to load or status was not checked.
     """
+    if not DLL._initialized:
+        DLL.initialize()
     return Loader.cpu_status
+
+
+def _prepare_images(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, int, int, int]:
+    """Shared helper to validate shapes, dtypes, and enforce memory contiguity."""
+    if x.shape != y.shape:
+        raise ValueError(f"Input images must have the same shape. Got {x.shape} and {y.shape}")
+
+    if x.ndim == 2:
+        h, w = x.shape
+        c = 1
+    elif x.ndim == 3:
+        h, w, c = x.shape
+    else:
+        raise ValueError(f"Unsupported image dimensions: {x.shape}")
+
+    if x.dtype == np.float64:
+        x = x.astype(np.float32)
+    if y.dtype == np.float64:
+        y = y.astype(np.float32)
+
+    x = np.ascontiguousarray(x)
+    y = np.ascontiguousarray(y)
+
+    return x, y, w, h, c
 
 
 def psnr(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None) -> float:
@@ -109,22 +154,23 @@ def psnr(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None) ->
         float: The PSNR value.
 
     Raises:
-        ValueError: If the input images have unsupported dimensions.
+        ValueError: If the input images have unsupported dimensions or differing shapes.
+        TypeError: If an unsupported dtype is provided.
     """
-    if x.ndim == 2:
-        h, w = x.shape
-        c = 1
-    elif x.ndim == 3:
-        h, w, c = x.shape
-    else:
-        raise ValueError(f"Unsupported image dimensions: {x.shape}")
+    x, y, w, h, c = _prepare_images(x, y)
 
-    x = x.astype('float32') if (x.dtype == 'float64') else x
-    y = y.astype('float32') if (y.dtype == 'float64') else y
-    if (DLL.had_function('PSNR_Byte') and x.dtype == 'uint8' and y.dtype == 'uint8'):
-        return DLL.PSNR_Byte(x.reshape([-1]), y.reshape([-1]), w * c, w, h, 255 if (data_range is None) else int(data_range))
-    if (DLL.had_function('PSNR_Float') and x.dtype == 'float32' and y.dtype == 'float32'):
-        return DLL.PSNR_Float(x.reshape([-1]), y.reshape([-1]), w * c, w, h, 255.0 if (data_range is None) else float(data_range))
+    if not DLL._initialized:
+        DLL.initialize()
+
+    func = DLL.PSNR_DISPATCH.get(x.dtype.type)
+    if func is None:
+        raise TypeError(f"Unsupported dtype: {x.dtype}")
+
+    maxval = 255 if x.dtype.type is np.uint8 else 255.0
+    if data_range is not None:
+        maxval = type(maxval)(data_range)
+
+    return func(x.ravel(), y.ravel(), w * c, w, h, maxval)
 
 
 def ssim(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None, win_size: int = 7) -> float:
@@ -145,22 +191,23 @@ def ssim(x: np.ndarray, y: np.ndarray, data_range: int | float | None = None, wi
         float: The SSIM value.
 
     Raises:
-        ValueError: If the input images have unsupported dimensions.
+        ValueError: If the input images have unsupported dimensions or differing shapes.
+        TypeError: If an unsupported dtype is provided.
     """
-    if x.ndim == 2:
-        h, w = x.shape
-        c = 1
-    elif x.ndim == 3:
-        h, w, c = x.shape
-    else:
-        raise ValueError(f"Unsupported image dimensions: {x.shape}")
+    x, y, w, h, c = _prepare_images(x, y)
 
-    x = x.astype('float32') if (x.dtype == 'float64') else x
-    y = y.astype('float32') if (y.dtype == 'float64') else y
-    if (DLL.had_function('SSIM_Byte') and x.dtype == 'uint8' and y.dtype == 'uint8'):
-        return DLL.SSIM_Byte(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size, 255 if (data_range is None) else int(data_range))
-    if (DLL.had_function('SSIM_Float') and x.dtype == 'float32' and y.dtype == 'float32'):
-        return DLL.SSIM_Float(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size, 255.0 if (data_range is None) else float(data_range))
+    if not DLL._initialized:
+        DLL.initialize()
+
+    func = DLL.SSIM_DISPATCH.get(x.dtype.type)
+    if func is None:
+        raise TypeError(f"Unsupported dtype: {x.dtype}")
+
+    maxval = 255 if x.dtype.type is np.uint8 else 255.0
+    if data_range is not None:
+        maxval = type(maxval)(data_range)
+
+    return func(x.ravel(), y.ravel(), w * c, w, h, win_size, maxval)
 
 
 def ssim_slow(x: np.ndarray, y: np.ndarray, win_size: int = 7) -> float:
@@ -178,19 +225,16 @@ def ssim_slow(x: np.ndarray, y: np.ndarray, win_size: int = 7) -> float:
         float: The SSIM value.
 
     Raises:
-        ValueError: If the input images have unsupported dimensions.
+        ValueError: If the input images have unsupported dimensions or differing shapes.
         NotImplementedError: If the input images are not of type 'uint8'.
     """
-    if x.ndim == 2:
-        h, w = x.shape
-        c = 1
-    elif x.ndim == 3:
-        h, w, c = x.shape
-    else:
-        raise ValueError(f"Unsupported image dimensions: {x.shape}")
+    x, y, w, h, c = _prepare_images(x, y)
 
-    if x.dtype != 'uint8' or y.dtype != 'uint8':
+    if not DLL._initialized:
+        DLL.initialize()
+
+    func = DLL.SSIM_SLOW_DISPATCH.get(x.dtype.type)
+    if func is None:
         raise NotImplementedError("ssim_slow is only implemented for uint8 data types.")
 
-    if DLL.had_function('SSIM_Byte_Slow'):
-        return DLL.SSIM_Byte_Slow(x.reshape([-1]), y.reshape([-1]), w * c, w, h, win_size)
+    return func(x.ravel(), y.ravel(), w * c, w, h, win_size)
