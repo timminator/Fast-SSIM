@@ -21,6 +21,9 @@ classifiers = [
 ]
 dependencies = ["numpy"]
 
+[dependency-groups]
+dev = ["ruff"]
+
 [project.urls]
 Homepage = "https://github.com/timminator/Fast-SSIM"
 documentation = "https://github.com/timminator/Fast-SSIM/blob/master/README.md"
