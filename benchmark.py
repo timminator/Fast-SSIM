@@ -1,26 +1,27 @@
 import platform
+import sys
 import time
 
-import numpy as np
-from skimage.metrics import peak_signal_noise_ratio as psnr_skimage
+import numpy as np  # type: ignore[import-not-found, unused-ignore]
+from skimage.metrics import peak_signal_noise_ratio as psnr_skimage  # type: ignore[import-not-found, unused-ignore]
 from skimage.metrics import structural_similarity as ssim_skimage
 
 import fast_ssim
 
 
-def get_cpu_name():
+def get_cpu_name() -> str:
     try:
-        if platform.system() == "Windows":
+        if sys.platform == "win32":
             import winreg
             key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
             name, _ = winreg.QueryValueEx(key, "ProcessorNameString")
-            return name.strip()
-        elif platform.system() == "Linux":
+            return str(name).strip()
+        elif sys.platform.startswith("linux"):
             with open("/proc/cpuinfo") as f:
                 for line in f:
                     if "model name" in line:
                         return line.split(":")[1].strip()
-        elif platform.system() == "Darwin":
+        elif sys.platform == "darwin":
             import subprocess
             return subprocess.check_output(["sysctl", "-n", "machdep.cpu.brand_string"]).decode().strip()
     except Exception:
@@ -28,7 +29,7 @@ def get_cpu_name():
     return platform.processor() or "Unknown CPU"
 
 
-def run_benchmark(name, width, height, iterations=10):
+def run_benchmark(name: str, width: int, height: int, iterations: int = 10) -> list[tuple[str, str, float, float, float]]:
     print(f"Benchmarking {name} ({iterations} iterations)... please wait.")
 
     img1 = np.random.randint(0, 256, (height, width, 3), dtype=np.uint8)
@@ -37,7 +38,7 @@ def run_benchmark(name, width, height, iterations=10):
     # --- SSIM BENCHMARK ---
     start_sk = time.perf_counter()
     for _ in range(iterations):
-        ssim_skimage(img1, img2, data_range=255, channel_axis=2, win_size=7)
+        ssim_skimage(img1, img2, data_range=255, channel_axis=2, win_size=7)  # type: ignore[no-untyped-call, unused-ignore]
     total_skimage_ssim = time.perf_counter() - start_sk
 
     start_fast = time.perf_counter()
@@ -52,7 +53,7 @@ def run_benchmark(name, width, height, iterations=10):
     # --- PSNR BENCHMARK ---
     start_sk = time.perf_counter()
     for _ in range(iterations):
-        psnr_skimage(img1, img2, data_range=255)
+        psnr_skimage(img1, img2, data_range=255)  # type: ignore[no-untyped-call, unused-ignore]
     total_skimage_psnr = time.perf_counter() - start_sk
 
     start_fast = time.perf_counter()
@@ -73,7 +74,7 @@ def run_benchmark(name, width, height, iterations=10):
 if __name__ == "__main__":
     print("Starting Benchmark Suite...\n")
 
-    results = []
+    results: list[tuple[str, str, float, float, float]] = []
     results.extend(run_benchmark(name="1080p", width=1920, height=1080, iterations=10))
     results.extend(run_benchmark(name="4K", width=3840, height=2160, iterations=10))
 

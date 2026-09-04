@@ -1,4 +1,4 @@
-from skimage.io import imread
+from skimage.io import imread  # type: ignore[import-not-found, unused-ignore]
 
 import fast_ssim
 

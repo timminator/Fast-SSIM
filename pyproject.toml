@@ -19,10 +19,16 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Topic :: Scientific/Engineering :: Image Processing",
 ]
-dependencies = ["numpy"]
+dependencies = []
 
 [dependency-groups]
-dev = ["ruff"]
+dev = [
+    "mypy",
+    "pre-commit",
+    "ruff",
+    "build",
+    "twine",
+]
 
 [project.urls]
 Homepage = "https://github.com/timminator/Fast-SSIM"
@@ -30,11 +36,15 @@ documentation = "https://github.com/timminator/Fast-SSIM/blob/master/README.md"
 Repository = "https://github.com/timminator/Fast-SSIM.git"
 Issues = "https://github.com/timminator/Fast-SSIM/issues"
 
+[tool.mypy]
+strict = true
+exclude = ["build"]
+
 [tool.setuptools]
 packages = ["fast_ssim"]
 
 [tool.setuptools.package-data]
-fast_ssim = ["resources/*ssim.*"]
+fast_ssim = ["resources/*ssim.*", "py.typed"]
 
 [tool.setuptools.dynamic]
 version = {attr = "fast_ssim._core.__version__"}
